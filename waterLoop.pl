@@ -1,10 +1,10 @@
 #!/usr/bin/perl
 
 use warnings; use strict; use Getopt::Std;
-use vars qw($opt_n $opt_t $opt_l $opt_i $opt_r $opt_c);
-getopts("n:t:l:i:r:c");
+use vars qw($opt_n $opt_t $opt_l $opt_i $opt_r $opt_s $opt_c);
+getopts("n:t:l:i:r:s:c");
 
-my $usage = "usage: $0 [options] -n <gene name> -t <conversion threshold> -l <minimum R-loop length> -i <path to index> -r <path to reads> 
+my $usage = "usage: $0 [options] -n <gene name> -t <conversion threshold> -l <minimum R-loop length> -i <path to index> -r <path to reads> -s <path to original gene sequence> 
 
 Options:
 -c: consider Cs in CpG context
@@ -15,6 +15,7 @@ Extra information:
 -l: minimum length in base pairs to be considered an R-loop
 -i: must be path to directory containing indexes, not the indexes file itself
 -r: must be path to reads file itself named pacbio.fastq
+-s: must be path to sequence file itself
 
 -format of .fa index file:
 	>CALM3
@@ -22,11 +23,10 @@ Extra information:
 	>MYC
 	CTAGCTA...
 
--This Rloops.pl script must be in a directory with a .txt file containing the sequence of the gene named as <gene>seq.txt (e.g. CALM3seq.txt). 
 -The gene index must be +/- 10,000 bp around the gene.
 ";
 
-die $usage if not ($opt_n) or not ($opt_i) or not ($opt_r);
+die $usage if not ($opt_n) or not ($opt_i) or not ($opt_r) or not ($opt_s);
 
 #runs bismark (output file will be pacbio.fastq_bismark_bt2.sam) only if it hasn't been ran previously
 unless(-e "./pacbio.fastq_bismark_bt2.sam")
@@ -35,8 +35,7 @@ unless(-e "./pacbio.fastq_bismark_bt2.sam")
 }
 
 #takes sequence of gene and splits into array of individual bases
-my $sequence = $opt_n . "seq.txt";
-open(SEQ, $sequence) or die "Could not open $opt_n . seq.txt: $!";
+open(SEQ, $opt_s) or die "Could not open $opt_s: $!";
 my @seq = split("", <SEQ>);
 close SEQ;
 
@@ -108,6 +107,8 @@ unless(-e $bismarkOutput)
 
 my $methylationPos = "methylationPos" . $opt_n . ".txt";
 my $methylationNeg = "methylationNeg" . $opt_n . ".txt";
+$methylationPos = "methylationPos" . $opt_n . "CG.txt" if($opt_c);
+$methylationNeg = "methylationNeg" . $opt_n . "CG.txt" if($opt_c);
 
 if($opt_c)
 {
@@ -130,8 +131,8 @@ open(FILENEG, ">", $fileNeg) or die "Could not open $fileNeg: $!";
 my $j = 13177;
 for(my $i=0; $i<2; $i++)
 {
-	my $analyzeFile = "methylationPosCALM3.txt" if($i==0);
-	$analyzeFile = "methylationNegCALM3.txt" if($i==1);
+	my $analyzeFile = $methylationPos if($i==0);
+	$analyzeFile = $methylationNeg if($i==1);
 	open(my $analyze, $analyzeFile) or die "Could not open $analyzeFile: $!";
 	my (@read) = ("0\t")x(@seq);
 	while(my $line = <$analyze>)
@@ -184,12 +185,10 @@ for(my $i=0; $i<2; $i++)
 {
 	my $fileLast = $opt_n . "PosPositions.txt" if($i==0);
 	$fileLast = $opt_n . "NegPositions.txt" if($i==1);
-	#open(my $lastFile, $fileLast) or die "Could not open $fileLast: $!";
-	#while(my $lineFinal = <$lastFile>)
-	#{
-my @lineFinal = `cat $fileLast`;
-  for (my $p =0 ; $p < @lineFinal; $p++) {
-     my $lineFinal = $lineFinal[$p];
+	my @lineFinal = `cat $fileLast`;
+  	for (my $p =0 ; $p < @lineFinal; $p++) 
+	{
+		my $lineFinal = $lineFinal[$p];
 		chomp($lineFinal);
 		my @fields = split("\t", $lineFinal);
 		for(my $z=0; $z<@fields; $z++)
@@ -231,18 +230,18 @@ my @lineFinal = `cat $fileLast`;
 				}
 				if($opt_c)
 				{
-					if($z != (@seq-1) && $seq[$z] eq "G" && $seq[$z+1] eq "A" && $fields[$z+1] == 1)
+					if($z != (@seq-1) && $seq[$z] eq "G" && $seq[$z+1] eq "C" && $fields[$z+1] == 1)
                {
                   $fields[$z+1] = 3;
                }
-               if($z != (@seq-1) && $seq[$z] eq "G" && $seq[$z+1] eq "A" && $fields[$z+1] == 0)
+               if($z != (@seq-1) && $seq[$z] eq "G" && $seq[$z+1] eq "C" && $fields[$z+1] == 0)
                {
                   $fields[$z+1] = 4;
                }
 				}
 				else
 				{
-					if($z != (@seq-1) && $seq[$z] eq "G" && $seq[$z+1] eq "A")
+					if($z != (@seq-1) && $seq[$z] eq "G" && $seq[$z+1] eq "C")
       			{
          			$fields[$z+1] = 2;
       			}
@@ -305,8 +304,67 @@ my @lineFinal = `cat $fileLast`;
    	$conPer = 0;
 	} 
 }
-open (my $outR, ">", "heatmap.R") or die;
-print $outR;
-close $outR;
 
-`R --vanilla --no-save < heatmap.R`;
+my $finalPosPDF = $opt_n . "Pos" . ($opt_t*100) . ".pdf";
+my $finalNegPDF = $opt_n . "Neg" . ($opt_t*100) . ".pdf";
+$finalPosPDF = $opt_n . "Pos" . ($opt_t*100) . "CG.pdf" if($opt_c);
+$finalNegPDF = $opt_n . "Neg" . ($opt_t*100) . "CG.pdf" if($opt_c);
+
+my $Rscript = "MakeHeatmap.R";
+open(my $out, ">", $Rscript) or die "Can't print to $Rscript: $!\n";
+if($opt_c)
+{
+	print $out "
+		library(\"GMD\")
+		df = read.table(\"./$finalPos\", sep=\"\t\", row.names=1)
+		pdf(\"$finalPosPDF\")
+		heatmap.3(
+			x=df,
+			dendrogram=\"row\",
+			Rowv=TRUE, Colv=FALSE,
+			labRow=FALSE,labCol=FALSE,
+			breaks=c(-0.5,0.5,1.5,2.5,3.5,4.5,5.5,9.5),
+			color.FUN=function(x) c(\"grey\",\"green\",\"white\",\"blue\",\"black\",\"purple\",\"red\")
+		)
+		df2 = read.table(\"./$finalNeg\", sep=\"\t\", row.names=1)
+		pdf(\"$finalNegPDF\")
+      heatmap.3(
+         x=df2,
+         dendrogram=\"row\",
+         Rowv=TRUE, Colv=FALSE,
+         labRow=FALSE,labCol=FALSE,
+         breaks=c(-0.5,0.5,1.5,2.5,3.5,4.5,5.5,9.5),
+         color.FUN=function(x) c(\"grey\",\"green\",\"white\",\"blue\",\"black\",\"purple\",\"red\")
+      )
+		dev.off()
+	";
+}
+else
+{
+   print $out "
+      library(\"GMD\")
+      df = read.table(\"./$finalPos\", sep=\"\t\", row.names=1)
+      pdf(\"$finalPosPDF\")
+      heatmap.3(
+         x=df,
+         dendrogram=\"row\",
+         Rowv=TRUE, Colv=FALSE,
+         labRow=FALSE,labCol=FALSE,
+         breaks=c(-0.5,0.5,1.5,2.5,9.5),
+         color.FUN=function(x) c(\"grey\",\"green\",\"white\",\"red\")
+      )
+		df2 = read.table(\"./$finalNeg\", sep=\"\t\", row.names=1)
+      pdf(\"$finalNegPDF\")
+      heatmap.3(
+         x=df2,
+         dendrogram=\"row\",
+         Rowv=TRUE, Colv=FALSE,
+         labRow=FALSE,labCol=FALSE,
+         breaks=c(-0.5,0.5,1.5,2.5,9.5),
+         color.FUN=function(x) c(\"grey\",\"green\",\"white\",\"red\")
+      )
+      dev.off()
+   ";
+}
+close $out;
+system("R --vanilla --no-save < $Rscript"); 
