@@ -1,10 +1,10 @@
 #!/usr/bin/perl
 
 use warnings; use strict; use Getopt::Std;
-use vars qw($opt_n $opt_t $opt_l $opt_i $opt_r $opt_s $opt_c);
-getopts("n:t:l:i:r:s:c");
+use vars qw($opt_n $opt_t $opt_l $opt_r $opt_q $opt_s $opt_g $opt_c);
+getopts("n:t:l:r:q:s:g:c");
 
-my $usage = "usage: $0 [options] -n <gene name> -t <conversion threshold> -l <minimum R-loop length> -i <path to index> -r <path to reads> -s <path to original gene sequence> 
+my $usage = "usage: $0 [options] -n <gene name> -t <conversion threshold> -l <minimum R-loop length> -r <path to reads> -q <minimum mapping quality for each read to be considered> -s <path to original gene sequence> -g <path to reference genome for indexing> 
 
 Options:
 -c: consider Cs in CpG context
@@ -13,25 +13,44 @@ Extra information:
 -n: gene name must be in all caps (e.g. CALM3)
 -t: percentage (0.0-1.0) of Cs that must be converted to be considered an R-loop
 -l: minimum length in base pairs to be considered an R-loop
--i: must be path to directory containing indexes, not the indexes file itself
 -r: must be path to reads file itself named pacbio.fastq
+-q: must be phred score (e.g. score of 40 = 99.99% base call accuracy)
 -s: must be path to sequence file itself
+-g: must be path to .fa file containing reference genome used for indexing
 
--format of .fa index file:
-	>CALM3
-	TCACCCA...
-	>MYC
-	CTAGCTA...
-
--The gene index must be +/- 10,000 bp around the gene.
+-Must have Bisulfite_Genome directory in same directory as this executable.
 ";
 
-die $usage if not ($opt_n) or not ($opt_i) or not ($opt_r) or not ($opt_s);
+die $usage if not ($opt_n) or not ($opt_t) or not ($opt_l) or not ($opt_r) or not ($opt_q) or not ($opt_s) or not ($opt_g);
 
 #runs bismark (output file will be pacbio.fastq_bismark_bt2.sam) only if it hasn't been ran previously
 unless(-e "./pacbio.fastq_bismark_bt2.sam")
 {
-	system("srun -p bigmemh bismark --bowtie2 --rdg 2,1 --rfg 2,1 --score_min L,0,-0.8 $opt_i $opt_r") == 0 or die "Failed to run bismark.\n";
+	#allows user to enter coordinates of PCR primers to create indexes for genes. Genes are indexed +/- 50bp on either side. 
+	my $geneIndexes = "geneIndexes.bed";
+	open(my $indexFile, ">", $geneIndexes) or die "Could not open $geneIndexes: $!";
+
+	my $user = "y";
+	print "Gene indexes:\n";
+	while($user eq "y")
+	{	
+		print "Enter chromosome number(e.g. chr2) followed by starting coordinate, ending coordinate, and gene name(in all caps). Each field should be separated by tab.\n";
+		my $index = <STDIN>;
+		my @indexes = split("\t", $index);
+		$indexes[1] -= 50;
+		$indexes[2] += 50;
+		my $ind = join("\t", @indexes);
+		print $indexFile "$ind"; 
+		print "Would you like to input another index? (y or n)\n";
+		$user = <STDIN>;
+		chomp($user);
+	}
+
+	system("bedtools getfasta -fi $opt_g -bed geneIndexes.bed -fo geneIndexes.fa -name") or die "Failed to run bedtools: $!\n";
+
+	system("bismark_genome_preparation --bowtie2 ./") or die "Failed to run bismark genome preparation: $!\n";
+
+   system("bismark --bowtie2 --rdg 2,1 --rfg 2,1 --score_min L,0,-0.8 ./ $opt_r") == 0 or die "Failed to run bismark: $!\n";
 }
 
 #takes sequence of gene and splits into array of individual bases
@@ -47,7 +66,7 @@ open(my $negativeReads, ">", $negative) or die "Could not open $negative: $!";
 my $samFile = "pacbio.fastq_bismark_bt2.sam";
 open(my $sam, $samFile) or die "Could not open $samFile: $!";
 
-#loops through each read and writes high quality reads into two separate files ("gene"Positive.txt and "gene"Negative.txt)
+#loops through each read and writes high quality reads into two separate files <gene>Positive.txt and <gene>Negative.txt
 while(my $line = <$sam>)
 {
 	chomp($line);
@@ -57,13 +76,13 @@ while(my $line = <$sam>)
    {
       next
    }
-	#discounts if mapping quality is not phred score of 40 (99.99% base call accuracy)
-   if($fields[4] != 40)
+	#discounts if mapping quality is not at least phred score specified
+   if($fields[4] < $opt_q)
    {
       next
    }
-	#discounts any read that is the gene of interest, but not the proper length or at the proper location in genome 
-	if(($fields[2] eq "$opt_n") && (length($fields[9]) < ((@seq)*.85)) && (($fields[3] < 10000-(@seq*1.1)) || ($fields[3] > 10000+@seq+(@seq*1.1))))
+	#discounts any read that is not the gene of interest, the proper length, or at the proper location in genome(accounting for indexing)
+	if($fields[2] ne "$opt_n" || length($fields[9]) < (@seq) || $fields[3] < 45 || $fields[3] > (@seq+55))
    {
       next
    }
@@ -84,7 +103,7 @@ while(my $line = <$sam>)
    }
 }
 
-#sort by number of CT conversions, take top 1000, and remove the number of CT conversions in prepartion for methylation extractor
+#sorts by number of CT conversions, takes top 1000, and removes the number of CT conversions in prepartion for methylation extractor
 my $finalPositive = $opt_n . "PositiveFinal.txt";
 system("sort -k1,1rn $positive | head -n 1000 | cut -f 2- > $finalPositive");
 
@@ -98,6 +117,7 @@ my $CHGneg = "CHG_context_" . $finalNegative;
 my $CHHpos = "CHH_context_" . $finalPositive;
 my $CHHneg = "CHH_context_" . $finalNegative;
 
+#runs bismark methylation extractor on top 1000 reads of each strand
 my $bismarkOutput = "./" . $CPGpos;
 unless(-e $bismarkOutput)
 {
@@ -105,6 +125,7 @@ unless(-e $bismarkOutput)
 	system("bismark_methylation_extractor -s --comprehensive $finalNegative");
 }
 
+#pulls the CHH, CHG, and CpG sites together into methylationPos<gene>.txt and methylationNeg<gene>.txt (takes into account -c option)
 my $methylationPos = "methylationPos" . $opt_n . ".txt";
 my $methylationNeg = "methylationNeg" . $opt_n . ".txt";
 $methylationPos = "methylationPos" . $opt_n . "CG.txt" if($opt_c);
@@ -127,8 +148,8 @@ my $fileNeg = $opt_n . "NegPositions.txt";
 open(FILEPOS, ">", $filePos) or die "Could not open $filePos: $!";
 open(FILENEG, ">", $fileNeg) or die "Could not open $fileNeg: $!";
 
-###########CHANGE J TO @SEQ+10000
-my $j = 13177;
+#gets the position of each conversion (conversions=1; not converted=0)
+my $j = 50;
 for(my $i=0; $i<2; $i++)
 {
 	my $analyzeFile = $methylationPos if($i==0);
@@ -159,15 +180,23 @@ for(my $i=0; $i<2; $i++)
    	}
 		if($read[0] eq "$fields[0]\t")
    	{
-      	if($fields[4] eq "x" || $fields[4] eq "h" && $fields[3]>$j)
+      	if($fields[4] eq "x" || $fields[4] eq "h" || $fields[4] eq "z" || $fields[4] eq "u" && $fields[3]>$j)
       	{
          	my $index = ($fields[3] - $j + 1);
          	$read[$index] = "1\t";
       	}
-
    	}
 	}
 }
+
+#determines which regions of conversion are R-loops based on conversion threshold
+#0=not converted (grey)
+#1=converted (green)
+#2=non-C (white)
+#3=converted CpG (blue)
+#4=non-converted CpG  (black)
+#5=converted CpG in R-loop (purple)
+#9=converted C in R-loop (red)
 
 my $start = 1;
 my $end = $opt_l;
@@ -197,6 +226,7 @@ for(my $i=0; $i<2; $i++)
 		}
 		for(my $z=0; $z<@seq; $z++)
 		{
+			#positive reads
 			if($i==0)
 			{
 				if($seq[$z] ne "C")
@@ -222,6 +252,7 @@ for(my $i=0; $i<2; $i++)
       			}
 				}	
 			}
+			#negative reads
 			if($i==1)
 			{
 				if($seq[$z] ne "G")
@@ -256,7 +287,7 @@ for(my $i=0; $i<2; $i++)
 				{
             	$conC++;
          	}
-         	if($fields[$temp] == 0)
+         	if($fields[$temp] == 0 || $fields[$temp] == 4)
          	{
             	$nonConC++;
          	}
@@ -305,6 +336,7 @@ for(my $i=0; $i<2; $i++)
 	} 
 }
 
+#makes heatmaps for positive and negative strand
 my $finalPosPDF = $opt_n . "Pos" . ($opt_t*100) . ".pdf";
 my $finalNegPDF = $opt_n . "Neg" . ($opt_t*100) . ".pdf";
 $finalPosPDF = $opt_n . "Pos" . ($opt_t*100) . "CG.pdf" if($opt_c);
